@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { endpoints } from '../api/endpoints';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { Loader } from '../components/Loader';
@@ -16,51 +17,78 @@ type PhotoRowProps = {
   photo: Photo;
   isFavorite: boolean;
   onToggleFavorite: (id: number) => void;
-};
-
-function PhotoRow({ photo, isFavorite, onToggleFavorite }: PhotoRowProps) {
+}
+//////////////////
+const PhotoRow = memo(function PhotoRow({
+  photo,
+  isFavorite,
+  onToggleFavorite,
+}: PhotoRowProps) {
   simulateHeavyRender();
 
   return (
     <div className="photo-row">
       <span className="photo-row__id">#{photo.id}</span>
       <span className="photo-row__title">{photo.title}</span>
-      <span className="muted">Альбом {photo.albumId}</span>
+    <span className="muted">Альбом {photo.albumId}</span>
       <button type="button" className="button" onClick={() => onToggleFavorite(photo.id)}>
         {isFavorite ? 'Убрать' : 'В избранное'}
       </button>
     </div>
-  );
-}
+  )
+});
 
 export default function PhotosPage() {
   const { data: photos, isLoading, error, refetch } = useFetch<Photo[]>(endpoints.photos);
 
   const [query, setQuery] = useState('');
   const [albumId, setAlbumId] = useState('all');
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
-  const [favorites, setFavorites] = useState<number[]>([]);
+const [sortOrder, setSortOrder]= useState<'asc' | 'desc'>('asc');
+const [favorites, setFavorites] = useState<Set<number>>(() => new Set());
   const [secondsOnPage, setSecondsOnPage] = useState(0);
 
   useEffect(() => {
-    const timer = setInterval(() => setSecondsOnPage(s => s + 1), 1000);
+    const timer = setInterval(()  => setSecondsOnPage(s => s + 1), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const visiblePhotos = (photos ?? [])
-    .filter(photo => albumId === 'all' || photo.albumId === Number(albumId))
-    .filter(photo => photo.title.toLowerCase().includes(query.toLowerCase()))
-    .sort((a, b) =>
-      sortOrder === 'asc' ? a.title.localeCompare(b.title) : b.title.localeCompare(a.title)
-    );
+  
+  const visiblePhotos = useMemo(() => {
+    const list = photos ?? [];
+    const q = query.toLowerCase();
+    const album = albumId === 'all' ? null : Number(albumId);
 
-  const handleToggleFavorite = (id: number) => {
-    if (favorites.includes(id)) {
-      setFavorites(favorites.filter(favoriteId => favoriteId !== id));
-    } else {
-      setFavorites([...favorites, id]);
-    }
-  };
+    const filtered = list.filter(
+       photo =>
+        (album === null || photo.albumId === album) &&
+        photo.title.toLowerCase().includes(q)
+    )
+
+    return [...filtered].sort((a, b) =>
+      sortOrder === 'asc'
+        ? a.title.localeCompare(b.title)
+        : b.title.localeCompare(a.title)
+    );
+  }, [photos, query, albumId, sortOrder])
+  const handleToggleFavorite = useCallback((id: number) => {
+    setFavorites(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+      next.delete(id);
+      }
+       else {
+        next.add(id);
+      }
+      return next;
+    })
+  }, [])
+  const parentRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: visiblePhotos.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 56,
+    overscan: 5,
+  });
 
   if (isLoading) return <Loader text="Загружаем медиатеку..." />;
   if (error) return <ErrorMessage message={error} onRetry={refetch} />;
@@ -88,26 +116,45 @@ export default function PhotosPage() {
         <select
           className="input"
           value={sortOrder}
-          onChange={e => setSortOrder(e.target.value as 'asc' | 'desc')}
-        >
+          onChange={e => setSortOrder(e.target.value as 'asc' | 'desc')}>
           <option value="asc">А–Я</option>
           <option value="desc">Я–А</option>
         </select>
       </div>
 
       <p>
-        Показано: {visiblePhotos.length} из {photos?.length ?? 0}. В избранном: {favorites.length}
+        Показано: {visiblePhotos.length} из {photos?.length ?? 0}. В избранном: {favorites.size}
       </p>
-
-      <div className="photo-list">
-        {visiblePhotos.map(photo => (
-          <PhotoRow
-            key={photo.id}
-            photo={photo}
-            isFavorite={favorites.includes(photo.id)}
-            onToggleFavorite={handleToggleFavorite}
-          />
-        ))}
+      <div ref={parentRef} className="photo-list">
+        <div
+          style={{
+            height: `${virtualizer.getTotalSize()}px`,
+            width: '100%',
+            position: 'relative',
+          }}
+        >
+          {virtualizer.getVirtualItems().map(virtualItem => {
+            const photo = visiblePhotos[virtualItem.index];
+            return (
+              <div
+                key={virtualItem.key}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
+                <PhotoRow
+                  photo={photo}
+                  isFavorite={favorites.has(photo.id)}
+                  onToggleFavorite={handleToggleFavorite}
+                />
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
